@@ -12,6 +12,9 @@ import re
 import xml.etree.cElementTree as ET
 from zipfile import ZipFile
 
+re_column_letter = re.compile(r"[A-Z]+")
+re_column_name = re.compile(r"([A-Z]+)([0-9]+)")
+
 # ISO/IEC 29500:2011 in Part 1, section 18.8.30
 STANDARD_STYLES = {
     '0' : 'General',
@@ -72,7 +75,7 @@ class ExcelObj(ABC):
     @staticmethod
     def col_letter_to_num(letter):
         "Return column number for column letter ``letter``"
-        assert re.match(r'[A-Z]+', letter)
+        assert re_column_letter.match(letter)
         num = 0
         for char in letter:
             num = num * 26 + (ord(char.upper()) - ord('A')) + 1
@@ -118,7 +121,7 @@ class Worksheet(ExcelObj):
             self._num_rows = 0
         else:
             _, end = self.used_area.split(':')
-            last_col, last_row = re.match(r"([A-Z]+)([0-9]+)", end).groups()
+            last_col, last_row = re_column_name.match(end).groups()
             self._num_cols = self.col_letter_to_num(last_col)
             self._num_rows = int(last_row)
 
@@ -191,7 +194,7 @@ class Range(ExcelObj):
         with self.ws.get_sheet_xml() as xml_doc:
             row_tag = self.tag_with_ns('row', self.main_ns)
             c_tag = self.tag_with_ns('c', self.main_ns)
-            v_tag = self.tag_with_ns('v', self.main_ns)
+            v_tag = self.tag_with_ns('is', self.main_ns)
             row = []
             this_row = -1
             next_row = 1 if self.start is None else self.start
@@ -244,7 +247,7 @@ class Range(ExcelObj):
                 beg, end = rng.split(':')
             else:
                 beg = end = rng
-            cell_split = lambda cell: re.match(r"([A-Z]+)([0-9]+)", cell).groups()
+            cell_split = lambda cell: re_column_name.match(cell).groups()
             first_col, first_row = cell_split(beg)
             last_col, last_row = cell_split(end)
             first_col = self.col_letter_to_num(first_col) - 1 # python addressing
@@ -274,10 +277,16 @@ class Range(ExcelObj):
 
     def _row(self, row):
         lst = [None] * self.ws.num_cols
-        col_re = re.compile(r'[A-Z]+')
+        col_pos = 0
         for cell in row:
-            col = cell[0][:col_re.match(cell[0]).end()]
-            col_pos = self.col_letter_to_num(col) - 1
+            # apparently, 'r' attribute is optional and some MS products don't
+            # spit it out. So we default to incrementing from last known col
+            # (or 0 if we are at the beginning) when r is not available.
+            if cell[0]:
+                col = cell[0][:re_column_letter.match(cell[0]).end()]
+                col_pos = self.col_letter_to_num(col) - 1
+            else:
+                col_pos += 1
             style = self.ws.wb.styles[int(cell[3])] if cell[3] else ''
             # convert to python value (if necessary)
             celltype = cell[1]
@@ -337,8 +346,14 @@ class Workbook(ExcelObj):
             for sheet in tree.iter(tag):
                 name = sheet.get('name')
                 ref = sheet.get(ref_tag)
-                num = int(ref[3:])
-                sheet = Worksheet(self, name, num)
+                try:
+                    num = int(sheet.attrib['sheetId'])
+                    sheet = Worksheet(self, name, num)
+                    if sheet.num_cols > 0:
+                        pass
+                except:
+                    num = int(ref[3:])
+                    sheet = Worksheet(self, name, num)
                 sheet_map[name] = sheet
                 sheet_map[num] = sheet
         self._sheets = sheet_map
